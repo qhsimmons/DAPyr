@@ -141,6 +141,7 @@ dependencies:
   - pycparser=2.21=pyhd3eb1b0_0
   - pygments=2.19.1=py313h06a4308_0
   - pyparsing=3.2.0=py313h06a4308_0
+  - pyqg-jax=0.8.1=pyhecae5ae_1
   - pyqt=6.7.1=py313h6a678d5_1
   - pyqt6-sip=13.9.1=py313h5eee18b_1
   - pysocks=1.7.1=py313h06a4308_0

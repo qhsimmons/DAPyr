@@ -18,6 +18,9 @@ from . import Exceptions as dapExceptions
 import pickle
 import matplotlib.pyplot as plt
 import warnings
+import pyqg_jax
+import jax
+import jax.numpy as jnp
 
 from importlib import reload
 reload(OBS_ERRORS)
@@ -105,7 +108,7 @@ class Expt:
             return equality
 
 
-      def _spinup(self, Nx, Ne, dt, T, tau, funcptr, numPool, h_flag, H):
+      def _spinup(self, Nx, Ne, dt, T, tau, funcptr, numPool, h_flag, H, model_flag):
             #Initial Ensemble
             #Spin Up
             seed = self.getParam('seed')
@@ -113,8 +116,10 @@ class Expt:
                   rng = np.random.default_rng(seed)
             else:
                   rng = np.random.default_rng()
+            
             xt_0 = 3*np.sin(np.arange(Nx)/(6*2*np.pi))
-            xt_0, model_error = MODELS.model(xt_0, dt, 100, funcptr)
+            
+            xt_0, model_error = self.modelParams['rhs'].forecast(xt_0, 100, funcptr)
 
             if model_error != 0:
                   warnings.warn('Model integration failed.')
@@ -122,15 +127,19 @@ class Expt:
 
             #Multiprocessing
             xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
-            pfunc = partial(MODELS.model, dt = dt, T = 100, funcptr=funcptr)
+            xf_0, model_errors = self.modelParams['rhs'].forecast_batch(Nx, Ne, xf_0, 100, funcptr=funcptr)
             
-            with mp.get_context('fork').Pool(numPool) as pool:
-                  pool_results  = pool.map(pfunc, [xf_0[:, i] for i in range(Ne)])
-                  xf_0 = np.stack([x for x, _ in pool_results], axis = -1)
-                  model_errors = np.array([y for _, y in pool_results])
+#             xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
+#             pfunc = partial(self.modelParams['rhs'].forecast, dt = dt, steps = 100, funcptr=funcptr)
+            
+#             with mp.get_context('fork').Pool(numPool) as pool:
+#                   pool_results  = pool.map(pfunc, [xf_0[:, i] for i in range(Ne)])
+#                   xf_0 = np.stack([x for x, _ in pool_results], axis = -1)
+#                   model_errors = np.array([y for _, y in pool_results])
+
             if np.any(model_errors != 0):
-                  warnings.warn('Model integration failed.')
-                  self.modExpt({'status': 'init model error'})
+                      warnings.warn('Model integration failed.')
+                      self.modExpt({'status': 'init model error'})
             #for n in range(Ne):
             #      xf_0[:, n], model_error = MODELS.model(xf_0[:, n], dt, 100, funcptr)
             #      if model_error != 0 :
@@ -139,15 +148,15 @@ class Expt:
       
             #Create Model Truth
             xt = np.zeros((Nx, T))
-            xt[:,0], model_error = MODELS.model(xt_0, dt, 100, funcptr)
+            xt[:,0], model_error = self.modelParams['rhs'].forecast(xt_0, 100, funcptr)
 
             if model_error != 0:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
 
             for t in range(T-1):
-                  xt[:, t+1], model_error = MODELS.model(xt[:, t], dt, tau, funcptr)
-                  if model_error != 0:
+                    xt[:, t+1], model_error = self.modelParams['rhs'].forecast(xt[:, t], tau, funcptr)
+                    if model_error != 0:
                         warnings.warn('Model integration failed.')
                         self.modExpt({'status': 'init model error'})
 
@@ -181,7 +190,10 @@ class Expt:
                   case 2: #Lorenz 05
                         self.modelParams['rhs'] = MODELS.make_rhs_l05(self.modelParams['model_params'])
                         self.modelParams['Nx'] = 480
-            self.modelParams['funcptr'] = self.modelParams['rhs'].address
+                  case 3: #QG
+                        self.modelParams['rhs'] = MODELS.QGModel(self.modelParams['model_params'], self.basicParams['dt'])
+                        self.modelParams['Nx'] = 8192
+#             self.modelParams['funcptr'] = self.modelParams['rhs'].address
       
       def _configObs(self):
             #Extra Observation stuff
@@ -236,7 +248,7 @@ class Expt:
             h_flag = self.getParam('h_flag')
             H = self.getParam("H")
             #Do model spinup
-            xf_0, xt, Y = self._spinup(Nx, Ne, dt, T, tau, self.getParam('funcptr'), self.getParam('NumPool'), h_flag, H)
+            xf_0, xt, Y = self._spinup(Nx, Ne, dt, T, tau, self.getParam('funcptr'), self.getParam('NumPool'), h_flag, H, self.getParam('model_flag'))
 
             self.states['xf_0'] = xf_0
             self.states['xt'] = xt
@@ -264,6 +276,8 @@ class Expt:
                   case 1: #L96
                         self.basicParams['dt'] = 0.05
                   case 2: #L05
+                        self.basicParams['dt'] = 0.05
+                  case 3: #QG
                         self.basicParams['dt'] = 0.05
                   case _: #None Case
                         self.basicParams['dt'] = 0.01
@@ -305,7 +319,13 @@ class Expt:
             params = {'s': 10, 'r': 28, 'b':8/3, 'F': 8, 
                       'l05_F':15, 'l05_Fe':15,
                       'l05_K':32, 'l05_I':12, 
-                      'l05_b':10.0, 'l05_c':2.5}
+                      'l05_b':10.0, 'l05_c':2.5,
+                      'nx': 64, 'ny':None, 'L':1000000.0,
+                      'W':1000000.0, 'rek':5.787e-07,
+                      'filterfac':23.6, 'f':None, 'g':9.81,
+                      'beta':1.5e-11, 'rd':15000.0, 'delta':0.25,
+                      'H1':500, 'U1':0.025, 'U2':0.0,
+                      'precision':pyqg_jax.state.Precision.DOUBLE}
             self.modelParams['model_params'] = params
       def _initMisc(self):
             #Output Parameters
@@ -406,6 +426,7 @@ class Expt:
                   0: Lorenz 1963 (Nx = 3)
                   1: Lorenz 1996 (Nx = 40)
                   2: Lorenz 2005 (Nx  = 480)
+                  3: QG (Nx = 4096)
             Nx: {self.modelParams['Nx']} # The number of state variables
             
             params: {self.modelParams['model_params']} # Parameters to tune each forecast model
@@ -413,6 +434,7 @@ class Expt:
                   Lorenz 1963: [s, r, b]
                   Lorenz 1996: [F]
                   Lorenz 2005: [l05_F, l05_Fe, l05_K, l05_I, l05_b, l05_c]
+                  QG: [nx, ny, L, W, rek, filterfac, f, g, beta, rd, delta, H1, U1, U2, precision]
 
             ------------------------
             Observation Information
@@ -1038,8 +1060,8 @@ def runDA(expt: Expt, maxT : int = None):
       #Open pool      
       #TODO Add exception handling in case function fails, 
       # make sure all the resources are released!
-      pool = mp.get_context('fork').Pool(numPool)
-      pfunc = partial(MODELS.model, dt = dt, T = tau, funcptr = funcptr)
+#       pool = mp.get_context('fork').Pool(numPool)
+#       pfunc = partial(MODELS.model, dt = dt, T = tau, funcptr = funcptr)
 
       #Misc Parameters
       doSV = expt.getParam('doSV')
@@ -1154,11 +1176,11 @@ def runDA(expt: Expt, maxT : int = None):
             #Model integrate forward
             #Multiprocessing
             #xf = np.stack(pool.map(pfunc, [xa[:, i] for i in range(Ne)]), axis = -1)
-            pool_results  = pool.map(pfunc, [xa[:, i] for i in range(Ne)])
-            xf = np.stack([x for x, _ in pool_results], axis = -1)
-            model_errors = np.array([y for _, y in pool_results])
+            
+            xa, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, 100, funcptr=funcptr)
+            
             if np.any(model_errors != 0):
-                  pool.close()
+#                   pool.close()
                   warnings.warn('Model integration failed at time T = {}. Terminating Experiment'.format(t))
                   expt.modExpt({'status': 'run model error'})
                   return expt.getParam('status')
@@ -1172,7 +1194,7 @@ def runDA(expt: Expt, maxT : int = None):
             #           expt.modExpt({'status': 'run model error'})
             #           return expt.getParam('status')
 
-      pool.close()
+#       pool.close()
       # Save everything into a nice xarray format if SV calculations are on
       if doSV == 1:
             #Save everything into a netCDF here
