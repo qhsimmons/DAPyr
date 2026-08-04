@@ -126,8 +126,13 @@ class Expt:
                   self.modExpt({'status': 'init model error'})
 
             #Multiprocessing
-            xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
-            xf_0, model_errors = self.modelParams['rhs'].forecast_batch(Nx, Ne, xf_0, 100, funcptr=funcptr)
+            if Ne > 1:
+                  xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
+                  xf_0, model_errors = self.modelParams['rhs'].forecast_batch(Nx, Ne, xf_0, 100, funcptr=funcptr)
+            elif Ne == 1:
+                  xf_0 = xt_0 + rng.standard_normal(Nx)
+                  xf_0, model_errors = self.modelParams['rhs'].forecast(xf_0, 100, funcptr)
+                  xf_0 = xf_0[:, np.newaxis]
             
 #             xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
 #             pfunc = partial(self.modelParams['rhs'].forecast, dt = dt, steps = 100, funcptr=funcptr)
@@ -193,7 +198,8 @@ class Expt:
                   case 3: #QG
                         self.modelParams['rhs'] = MODELS.QGModel(self.modelParams['model_params'], self.basicParams['dt'])
                         self.modelParams['Nx'] = 8192
-#             self.modelParams['funcptr'] = self.modelParams['rhs'].address
+                        pickle.dumps(self.modelParams['rhs'].forecast_rollout)
+            # self.modelParams['funcptr'] = self.modelParams['rhs'].address
       
       def _configObs(self):
             #Extra Observation stuff
@@ -278,7 +284,7 @@ class Expt:
                   case 2: #L05
                         self.basicParams['dt'] = 0.05
                   case 3: #QG
-                        self.basicParams['dt'] = 0.05
+                        self.basicParams['dt'] = 7200
                   case _: #None Case
                         self.basicParams['dt'] = 0.01
             self.basicParams['Ne'] = 10
@@ -1177,7 +1183,10 @@ def runDA(expt: Expt, maxT : int = None):
             #Multiprocessing
             #xf = np.stack(pool.map(pfunc, [xa[:, i] for i in range(Ne)]), axis = -1)
             
-            xa, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, 100, funcptr=funcptr)
+            if Ne > 1:
+                  xa, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, 100, funcptr=funcptr)
+            elif Ne == 1:
+                  xa, model_errors = expt.modelParams['rhs'].forecast(xa, 100, funcptr=funcptr)
             
             if np.any(model_errors != 0):
 #                   pool.close()
