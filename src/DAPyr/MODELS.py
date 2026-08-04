@@ -205,8 +205,9 @@ class QGModel(Model):
         model_error = 0
         
         x_shaped = x.reshape(self.original_shape)
-        curr_state = original_state.update(q=x_shaped)
-        x = curr_state
+        model_state = original_state.state.update(q=x_shaped)
+        ab3_model_state = self.init_state.update(state=model_state)
+        x = ab3_model_state
         
         def loop_fn(carry, _x_shaped):
             current_state = carry
