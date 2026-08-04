@@ -7,6 +7,7 @@ import pyqg_jax
 import jax
 import jax.numpy as jnp
 import functools
+from functools import partial
 
 @functools.partial(jax.jit, static_argnames=["T"])
 def _model_qg_jit(x, T, stepped_model):
@@ -195,7 +196,7 @@ class QGModel(Model):
         #Need to pass in a 1d array of the state x, then reshape it into the model state, run step_model, then re-flatten and output flattened model state. I guess this is the only place where it matters that the data is structured?
         funcptr = kwargs.get('funcptr')
         dt = kwargs.get('dt')
-        original_state = self.init_state
+        original_state = self.init_state.update()
         
         if funcptr is None:
             funcptr = ''
@@ -204,8 +205,8 @@ class QGModel(Model):
         model_error = 0
         
         x_shaped = x.reshape(self.original_shape)
-        original_state.state.update(q=x_shaped)
-        x = original_state
+        current_state = original_state.state.update(q=x_shaped)
+        x = current_state
         
         def loop_fn(carry, _x_shaped):
             current_state = carry
@@ -228,14 +229,28 @@ class QGModel(Model):
         tmp, model_error = self.forecast_rollout(x, steps, funcptr, **kwargs)
         return tmp[:, -1], model_error
         
-    def forecast_batch_rollout(self, x_ens, steps, **kwargs):
-        return
+    def forecast_batch_rollout(self, x_ens, steps, funcptr, **kwargs):
+            
+            dt = kwargs.get('dt')
+            if dt is None:
+                  dt = self.dt
+
+            x_ens_T = x_ens.T
+
+            def single_forecast(x):
+                  return self.forecast_rollout(x, steps=steps, dt=dt, funcptr=funcptr)
+
+            x_fore, model_errors = jax.vmap(single_forecast)(x_ens_T)
+
+            x_fore = jnp.transpose(x_fore, (1,2,0))
+            
+            return x_fore, model_errors
         
     def forecast_batch(self, Nx, Ne, x_ens, steps, funcptr, **kwargs):
         sols = np.zeros((Nx, steps, Ne))
         model_errors = np.zeros(Ne)
-        for i in range(Ne):
-            sols[:, :, i], model_errors = self.forecast_rollout(x_ens[:,i], steps, funcptr)
+
+        sols, model_errors = self.forecast_batch_rollout(x_ens, steps, funcptr)
         return sols[:, -1, :], model_errors
     
     def make_qg(self, kwargs, dt):
