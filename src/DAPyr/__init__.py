@@ -117,7 +117,9 @@ class Expt:
             else:
                   rng = np.random.default_rng()
             
-            xt_0 = 3*np.sin(np.arange(Nx)/(6*2*np.pi))
+            # xt_0 = 3e-8*np.sin(np.arange(Nx)/(6*2*np.pi))
+            xt_0 = np.array(self.modelParams['rhs'].init_state.state.q)
+            xt_0.reshape(Nx,)
             
             xt_0, model_error = self.modelParams['rhs'].forecast(xt_0, 100, funcptr)
 
@@ -130,7 +132,7 @@ class Expt:
                   xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
                   xf_0, model_errors = self.modelParams['rhs'].forecast_batch(Nx, Ne, xf_0, 100, funcptr=funcptr)
             elif Ne == 1:
-                  xf_0 = xt_0 + rng.standard_normal(Nx)
+                  xf_0 = xt_0 + 1e-8*rng.standard_normal(Nx)
                   xf_0, model_errors = self.modelParams['rhs'].forecast(xf_0, 100, funcptr)
                   xf_0 = xf_0[:, np.newaxis]
             
@@ -159,6 +161,9 @@ class Expt:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
 
+            #This is causing all my problem I think
+            #With this new structure can we build this in MODELS.py? I think the stepper of the qg model already
+            #Does this much fasters
             for t in range(T-1):
                     xt[:, t+1], model_error = self.modelParams['rhs'].forecast(xt[:, t], tau, funcptr)
                     if model_error != 0:
@@ -198,7 +203,6 @@ class Expt:
                   case 3: #QG
                         self.modelParams['rhs'] = MODELS.QGModel(self.modelParams['model_params'], self.basicParams['dt'])
                         self.modelParams['Nx'] = 8192
-                        pickle.dumps(self.modelParams['rhs'].forecast_rollout)
             # self.modelParams['funcptr'] = self.modelParams['rhs'].address
       
       def _configObs(self):
@@ -1183,10 +1187,9 @@ def runDA(expt: Expt, maxT : int = None):
             #Multiprocessing
             #xf = np.stack(pool.map(pfunc, [xa[:, i] for i in range(Ne)]), axis = -1)
             
-            if Ne > 1:
-                  xa, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, 100, funcptr=funcptr)
-            elif Ne == 1:
-                  xa, model_errors = expt.modelParams['rhs'].forecast(xa, 100, funcptr=funcptr)
+            xf, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, tau, funcptr=funcptr)
+            # elif Ne == 1:
+            #       xf, model_errors = expt.modelParams['rhs'].forecast(xa, tau, funcptr=funcptr)
             
             if np.any(model_errors != 0):
 #                   pool.close()

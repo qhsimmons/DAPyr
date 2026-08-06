@@ -191,12 +191,12 @@ class QGModel(Model):
         super().__init__(modelparams, dt)
         self.stepped_model, self.init_state = self.make_qg(modelparams, dt)
         self.original_shape = self.init_state.state.q.shape
+        self.curr_state = self.init_state
         
     def forecast_rollout(self, x, steps, funcptr, **kwargs):
         #Need to pass in a 1d array of the state x, then reshape it into the model state, run step_model, then re-flatten and output flattened model state. I guess this is the only place where it matters that the data is structured?
         funcptr = kwargs.get('funcptr')
         dt = kwargs.get('dt')
-        original_state = self.init_state.update()
         
         if funcptr is None:
             funcptr = ''
@@ -205,12 +205,19 @@ class QGModel(Model):
         model_error = 0
         
         x_shaped = x.reshape(self.original_shape)
-        model_state = original_state.state.update(q=x_shaped)
-        ab3_model_state = self.init_state.update(state=model_state)
+        x_shaped = jnp.array(x_shaped)
+        x_shaped = x_shaped.astype(jnp.float32)
+
+      #   if jnp.isnan(x_shaped).any()==True:
+      #       print(np.isnan(x_shaped).any())
+
+        model_state = self.curr_state.state.update(q=x_shaped)
+        ab3_model_state = self.stepped_model.initialize_stepper_state(model_state)
         x = ab3_model_state
         
         def loop_fn(carry, _x_shaped):
             current_state = carry
+            
             next_state = self.stepped_model.step_model(current_state)
         
             return next_state, next_state
