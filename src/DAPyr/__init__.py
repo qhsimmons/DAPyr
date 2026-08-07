@@ -1070,9 +1070,6 @@ def runDA(expt: Expt, maxT : int = None):
       # Retrieve likelihood function (for use with LPF only)
       L = OBS_ERRORS.get_likelihood(assumed_obs_err_dist, assumed_obs_err_params)
 
-      #Print every x loops
-      counter = 0
-
       for t in range(T):
             #Observation
             xm = np.mean(xf, axis = -1)[:, np.newaxis]
@@ -1157,12 +1154,6 @@ def runDA(expt: Expt, maxT : int = None):
                   warnings.warn('Model integration failed at time T = {}. Terminating Experiment'.format(t))
                   expt.modExpt({'status': 'run model error'})
                   return expt.getParam('status')
-
-            counter = counter+1
-
-            if counter%100 == 0:
-                  print(f"T = {counter}")
-
 
             #No multiprocessing: Uncomment below for no multiprocessing
             #for n in range(Ne):
