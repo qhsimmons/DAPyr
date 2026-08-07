@@ -19,8 +19,6 @@ import pickle
 import matplotlib.pyplot as plt
 import warnings
 import pyqg_jax
-import jax
-import jax.numpy as jnp
 
 from importlib import reload
 reload(OBS_ERRORS)
@@ -87,8 +85,7 @@ class Expt:
             paramList = []
             for d in [self. basicParams, self.obsParams, self.modelParams, self.miscParams]:
                   paramList.extend(list(d.keys()))
-            paramList.remove('rhs')
-            paramList.remove('funcptr')
+
             return paramList
 
       def __eq__(self, other):
@@ -108,7 +105,7 @@ class Expt:
             return equality
 
 
-      def _spinup(self, Nx, Ne, dt, T, tau, funcptr, numPool, h_flag, H, model_flag):
+      def _spinup(self, Nx, Ne, T, tau, h_flag, H):
             #Initial Ensemble
             #Spin Up
             seed = self.getParam('seed')
@@ -116,59 +113,26 @@ class Expt:
                   rng = np.random.default_rng(seed)
             else:
                   rng = np.random.default_rng()
-            
-            # xt_0 = 3e-8*np.sin(np.arange(Nx)/(6*2*np.pi))
-            xt_0 = np.array(self.modelParams['rhs'].init_state.state.q)
-            xt_0.reshape(Nx,)
-            
-            xt_0, model_error = self.modelParams['rhs'].forecast(xt_0, 100, funcptr)
-
+            xf_0, xt_0 = self.model.init_condition(rng, Ne)
+            xt_0, model_error = self.model.forecast(xt_0, 100)
             if model_error != 0:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
 
-            #Multiprocessing
-            if Ne > 1:
-                  xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
-                  xf_0, model_errors = self.modelParams['rhs'].forecast_batch(Nx, Ne, xf_0, 100, funcptr=funcptr)
-            elif Ne == 1:
-                  xf_0 = xt_0 + 1e-8*rng.standard_normal(Nx)
-                  xf_0, model_errors = self.modelParams['rhs'].forecast(xf_0, 100, funcptr)
-                  xf_0 = xf_0[:, np.newaxis]
-            
-#             xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
-#             pfunc = partial(self.modelParams['rhs'].forecast, dt = dt, steps = 100, funcptr=funcptr)
-            
-#             with mp.get_context('fork').Pool(numPool) as pool:
-#                   pool_results  = pool.map(pfunc, [xf_0[:, i] for i in range(Ne)])
-#                   xf_0 = np.stack([x for x, _ in pool_results], axis = -1)
-#                   model_errors = np.array([y for _, y in pool_results])
-
+            #Multiprocessing (pool is owned and managed by self.model)
+            # xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
+            xf_0, model_errors = self.model.forecast_batch(xf_0, 100)
             if np.any(model_errors != 0):
-                      warnings.warn('Model integration failed.')
-                      self.modExpt({'status': 'init model error'})
-            #for n in range(Ne):
-            #      xf_0[:, n], model_error = MODELS.model(xf_0[:, n], dt, 100, funcptr)
-            #      if model_error != 0 :
-            #           warnings.warn('Model integration failed.')
-            #           self.modExpt({'status': 'init model error'})
-      
+                  warnings.warn('Model integration failed.')
+                  self.modExpt({'status': 'init model error'})
             #Create Model Truth
-            xt = np.zeros((Nx, T))
-            xt[:,0], model_error = self.modelParams['rhs'].forecast(xt_0, 100, funcptr)
-
+            xt_0, _ = self.model.forecast(xt_0, 100)
+            xt, model_error = self.model.forecast_rollout(xt_0, T*tau)
+            #Subselect the values I need based on tau
+            xt = xt[:, :-1:tau]
             if model_error != 0:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
-
-            #This is causing all my problem I think
-            #With this new structure can we build this in MODELS.py? I think the stepper of the qg model already
-            #Does this much fasters
-            for t in range(T-1):
-                    xt[:, t+1], model_error = self.modelParams['rhs'].forecast(xt[:, t], tau, funcptr)
-                    if model_error != 0:
-                        warnings.warn('Model integration failed.')
-                        self.modExpt({'status': 'init model error'})
 
             #Synthetic Observations
             true_obs_err_dist = self.getParam('true_obs_err_dist')
@@ -185,25 +149,33 @@ class Expt:
                         raise ValueError(f'Invalid Option Selected for Measurement Operator h: {h_flag}')
 
             Y = Y_perf + OBS_ERRORS.sample_errors(Y_perf, true_obs_err_dist, true_obs_err_params, rng)
-
             return xf_0, xt, Y
 
       def _configModel(self):
             model_flag = self.getParam('model_flag')
+            poolsize = self.getParam('numPool')
+            tau = self.getParam('tau')
+            dt = self.getParam('dt')
+            # Close out any pool owned by a previous model instance before
+            # dropping the reference to it.
+            if hasattr(self, 'model'):
+                  self.model.close_pool()
             match model_flag:
                   case 0: #Lorenz 63
-                        self.modelParams['rhs'] = MODELS.make_rhs_l63(self.modelParams['model_params'])
+                        #self.modelParams['rhs'] = MODELS.make_rhs_l63(self.modelParams['model_params'])
                         self.modelParams['Nx']  = 3
+                        self.model = MODELS.Lorenz63(self.modelParams['model_params'], dt, numprocs=poolsize)
                   case 1: #Lorenz 96
-                        self.modelParams['rhs'] = MODELS.make_rhs_l96(self.modelParams['model_params'])
+                        #self.modelParams['rhs'] = MODELS.make_rhs_l96(self.modelParams['model_params'])
                         self.modelParams['Nx'] = 40
+                        self.model = MODELS.Lorenz96(self.modelParams['model_params'], dt, numprocs=poolsize)
                   case 2: #Lorenz 05
-                        self.modelParams['rhs'] = MODELS.make_rhs_l05(self.modelParams['model_params'])
+                        #self.modelParams['rhs'] = MODELS.make_rhs_l05(self.modelParams['model_params'])
                         self.modelParams['Nx'] = 480
-                  case 3: #QG
-                        self.modelParams['rhs'] = MODELS.QGModel(self.modelParams['model_params'], self.basicParams['dt'])
+                        self.model = MODELS.Lorenz05(self.modelParams['model_params'], dt, numprocs=poolsize)
+                  case 3: #QG Model
                         self.modelParams['Nx'] = 8192
-            # self.modelParams['funcptr'] = self.modelParams['rhs'].address
+                        self.model = MODELS.QGModel(self.modelParams['model_params'], dt)
       
       def _configObs(self):
             #Extra Observation stuff
@@ -233,7 +205,7 @@ class Expt:
             #self.obsParams['C_pf'] = np.matmul(H, C_pf)
 
       def _clearAttributes(self):
-            needed_attrs = ['exptname', 'modelParams', 'obsParams', 'basicParams', 'miscParams', 'states']
+            needed_attrs = ['exptname', 'modelParams', 'obsParams', 'basicParams', 'miscParams', 'states', 'model']
             all_attrs = list(self.__dict__.keys())
             for attr in np.setdiff1d(all_attrs, needed_attrs):
                   self.__delattr__(attr)
@@ -246,10 +218,9 @@ class Expt:
             Ne = self.basicParams['Ne']
             T = self.basicParams['T']
             tau = self.obsParams['tau']
-
             #Reset Error Flag
             self.basicParams['error_flag'] = 0
-            
+
             self._configModel()
 
             self._configObs()
@@ -258,7 +229,7 @@ class Expt:
             h_flag = self.getParam('h_flag')
             H = self.getParam("H")
             #Do model spinup
-            xf_0, xt, Y = self._spinup(Nx, Ne, dt, T, tau, self.getParam('funcptr'), self.getParam('NumPool'), h_flag, H, self.getParam('model_flag'))
+            xf_0, xt, Y = self._spinup(Nx, Ne, T, tau, h_flag, H)
 
             self.states['xf_0'] = xf_0
             self.states['xt'] = xt
@@ -287,8 +258,6 @@ class Expt:
                         self.basicParams['dt'] = 0.05
                   case 2: #L05
                         self.basicParams['dt'] = 0.05
-                  case 3: #QG
-                        self.basicParams['dt'] = 7200
                   case _: #None Case
                         self.basicParams['dt'] = 0.01
             self.basicParams['Ne'] = 10
@@ -297,7 +266,8 @@ class Expt:
             self.basicParams['seed'] = -1
       def _initObs(self):
             self.obsParams['h_flag'] = 0 #Linear Operator
-            self.obsParams['tau'] = 1     #Model steps between observations
+            #Model steps between observations
+            self.obsParams['tau'] = 1 
             self.obsParams['obf'] = 1   #Observation spatial frequency: spacing between variables
             self.obsParams['obb'] = 0   #Observation buffer: number of variables to skip when generating obs
             #Localization
@@ -308,7 +278,6 @@ class Expt:
             self.obsParams['gamma'] = 0.30
             self.obsParams['init_infs'] = 0.8
             #LPF Parameters
-            self.obsParams['mixing_gamma'] = 0.3
             self.obsParams['kddm_flag'] = 0
             self.obsParams['min_res'] = 0.0
             self.obsParams['maxiter'] = 1
@@ -330,10 +299,10 @@ class Expt:
                       'l05_F':15, 'l05_Fe':15,
                       'l05_K':32, 'l05_I':12, 
                       'l05_b':10.0, 'l05_c':2.5,
-                      'nx': 64, 'ny':None, 'L':1000000.0,
-                      'W':1000000.0, 'rek':5.787e-07,
+                      'nx': 64, 'ny':None, 'L':1e6,
+                      'W':None, 'rek':5.787e-7,
                       'filterfac':23.6, 'f':None, 'g':9.81,
-                      'beta':1.5e-11, 'rd':15000.0, 'delta':0.25,
+                      'beta':1.5e-11, 'rd':15000, 'delta':0.25,
                       'H1':500, 'U1':0.025, 'U2':0.0,
                       'precision':pyqg_jax.state.Precision.DOUBLE}
             self.modelParams['model_params'] = params
@@ -411,6 +380,9 @@ class Expt:
                         self.obsParams[key] = val
                   elif self.miscParams.get(key) is not None:
                         self.miscParams[key] = val
+                        #If dealing with a LorenzModel that uses Pools, clean up the pool
+                        if key == 'numPool' and hasattr(self, 'model') and type(self.model).__bases__[0] is MODELS.LorenzModel:
+                              self.model.set_numprocs(val)
                   else:
                         warnings.warn('({}, {}) key-value pair not in available configurable parameters. Ignoring.'.format(key, val))
             #Only update parameters if they affect model spinup
@@ -436,7 +408,6 @@ class Expt:
                   0: Lorenz 1963 (Nx = 3)
                   1: Lorenz 1996 (Nx = 40)
                   2: Lorenz 2005 (Nx  = 480)
-                  3: QG (Nx = 4096)
             Nx: {self.modelParams['Nx']} # The number of state variables
             
             params: {self.modelParams['model_params']} # Parameters to tune each forecast model
@@ -444,7 +415,6 @@ class Expt:
                   Lorenz 1963: [s, r, b]
                   Lorenz 1996: [F]
                   Lorenz 2005: [l05_F, l05_Fe, l05_K, l05_I, l05_b, l05_c]
-                  QG: [nx, ny, L, W, rek, filterfac, f, g, beta, rd, delta, H1, U1, U2, precision]
 
             ------------------------
             Observation Information
@@ -486,7 +456,6 @@ class Expt:
             init_infs: {self.getParam('init_infs')} # Initial Mean and Variance of Inflation Parameter Estimate for Adaptive Inflation
 
             -----Local Particle Filter (LPF)-----
-            mixing_gamma: {self.getParam('mixing_gamma')} # Mixing coefficient for LPF
             kddm_flag: {self.getParam('kddm_flag')} # Determine whether to apply additional kernal density estimator in LPF step
                   0: Off
                   1: On
@@ -600,8 +569,7 @@ class Expt:
             memo[id(self)] = expt
             #Change 'rhs' and 'funcptr' because 
             #they are incompatible with the deepycopy method
-            self.modelParams['rhs'] = ''
-            self.modelParams['funcptr'] = ''
+            self.__delattr__('model')
             for name, attr in self.__dict__.items():
                   expt.__setattr__(name, copy.deepcopy(attr, memo))
             self._configModel()
@@ -730,8 +698,8 @@ def saveExpt(outputdir : str, expt: Expt):
       expt : Expt
           The experiment instance to save.
       """
-      expt.modelParams['rhs'] = ''
-      expt.modelParams['funcptr'] = ''
+      #Clean up the model so that you can pickle it.
+      expt.__delattr__('model')
       with open('{}/{}.expt'.format(outputdir, expt.exptname), 'wb') as f:
             pickle.dump(expt, f)
       expt._configModel()
@@ -1006,14 +974,12 @@ def runDA(expt: Expt, maxT : int = None):
                   raise ValueError('maxT greater than T in experiment ({} > {})'.format(maxT, T))
             T = maxT
 
-      numPool = expt.getParam('numPool')
       #Observation Parameters
       H = expt.getParam('H')
       Ny = expt.getParam('Ny')
       tau = expt.getParam('tau')
       C = expt.getParam('C')
       Nt_eff = expt.getParam('Nt_eff')
-      mixing_gamma = expt.getParam('mixing_gamma')
       min_res = expt.getParam('min_res')
       kddm_flag = expt.getParam('kddm_flag')
       maxiter = expt.getParam('maxiter')
@@ -1032,7 +998,8 @@ def runDA(expt: Expt, maxT : int = None):
       qc_flag = expt.getParam('qc_flag')
 
       #Model Parameters
-      params, funcptr = expt.getParam('model_params'), expt.getParam('funcptr')
+      model = expt.model
+      params = expt.getParam('model_params')
       saveEns = expt.getParam('saveEns')
       saveEnsMean = expt.getParam('saveEnsMean')
       saveForecastEns = expt.getParam('saveForecastEns')
@@ -1067,12 +1034,6 @@ def runDA(expt: Expt, maxT : int = None):
                   raise KeyError(f'Obs QAQC turned on but no observation error standard deviation provided in assumed_obs_err_params: {assumed_obs_err_params}')
             
 
-      #Open pool      
-      #TODO Add exception handling in case function fails, 
-      # make sure all the resources are released!
-#       pool = mp.get_context('fork').Pool(numPool)
-#       pfunc = partial(MODELS.model, dt = dt, T = tau, funcptr = funcptr)
-
       #Misc Parameters
       doSV = expt.getParam('doSV')
       #SV Parameters if flag is triggered
@@ -1100,7 +1061,7 @@ def runDA(expt: Expt, maxT : int = None):
             if storeCovar != 0:
                   sv_covar = {'Xa': (['t', 'Nx','mem'], np.zeros((sv_t, Nx, Ne))*np.nan), 
                                             'Xf': (['t', 'Nx','mem'], np.zeros((sv_t, Nx, Ne))*np.nan)}
-            svpfunc = partial(MODELS.model, dt = dt, T = forecastSV, funcptr = funcptr)
+            #svpfunc = partial(MODELS.model, dt = dt, T = forecastSV, funcptr = funcptr)
 
       # Time Loop
       xf_0, xt, Y = expt.getStates()
@@ -1108,6 +1069,9 @@ def runDA(expt: Expt, maxT : int = None):
 
       # Retrieve likelihood function (for use with LPF only)
       L = OBS_ERRORS.get_likelihood(assumed_obs_err_dist, assumed_obs_err_params)
+
+      #Print every x loops
+      counter = 0
 
       for t in range(T):
             #Observation
@@ -1145,12 +1109,11 @@ def runDA(expt: Expt, maxT : int = None):
                         else:
                               xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
                   case 1: #LPF
-                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, mixing_gamma, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
+                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
                   case 2: # Nothing
                         xa = xf
 
             if e_flag != 0:
-                  pool.close()
                   expt.modExpt({'status': 'run DA error'})
                   return expt.getParam('status')
             
@@ -1165,11 +1128,11 @@ def runDA(expt: Expt, maxT : int = None):
             if doSV == 1 and t % stepSV == 0:
                   #Run SV calculation  
                   #xf_sv= np.stack(pool.map(svpfunc, [xa[:, i] for i in range(Ne)]), axis = -1)
-                  pool_results  = pool.map(svpfunc, [xa[:, i] for i in range(Ne)])
-                  xf_sv = np.stack([x for x, _ in pool_results], axis = -1)
-                  model_errors = np.array([y for _, y in pool_results])
+                  #pool_results  = pool.map(svpfunc, [xa[:, i] for i in range(Ne)])
+                  #xf_sv = np.stack([x for x, _ in pool_results], axis = -1)
+                  #model_errors = np.array([y for _, y in pool_results])
+                  xf_sv, model_errors = model.forecast_batch(xa, forecastSV)
                   if np.any(model_errors != 0):
-                        pool.close()
                         warnings.warn('Model integration failed at time T = {}. Terminating Experiment'.format(t))
                         expt.modExpt({'status': 'run model error'})
                         return expt.getParam('status')
@@ -1186,16 +1149,19 @@ def runDA(expt: Expt, maxT : int = None):
             #Model integrate forward
             #Multiprocessing
             #xf = np.stack(pool.map(pfunc, [xa[:, i] for i in range(Ne)]), axis = -1)
-            
-            xf, model_errors = expt.modelParams['rhs'].forecast_batch(Nx, Ne, xa, tau, funcptr=funcptr)
-            # elif Ne == 1:
-            #       xf, model_errors = expt.modelParams['rhs'].forecast(xa, tau, funcptr=funcptr)
-            
+            #pool_results  = pool.map(pfunc, [xa[:, i] for i in range(Ne)])
+            #xf = np.stack([x for x, _ in pool_results], axis = -1)
+            #model_errors = np.array([y for _, y in pool_results])
+            xf, model_errors = model.forecast_batch(xa, tau)
             if np.any(model_errors != 0):
-#                   pool.close()
                   warnings.warn('Model integration failed at time T = {}. Terminating Experiment'.format(t))
                   expt.modExpt({'status': 'run model error'})
                   return expt.getParam('status')
+
+            counter = counter+1
+
+            if counter%100 == 0:
+                  print(f"T = {counter}")
 
 
             #No multiprocessing: Uncomment below for no multiprocessing
@@ -1206,7 +1172,6 @@ def runDA(expt: Expt, maxT : int = None):
             #           expt.modExpt({'status': 'run model error'})
             #           return expt.getParam('status')
 
-#       pool.close()
       # Save everything into a nice xarray format if SV calculations are on
       if doSV == 1:
             #Save everything into a netCDF here
