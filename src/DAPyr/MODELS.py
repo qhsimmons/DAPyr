@@ -342,10 +342,16 @@ class Lorenz05(LorenzModel):
 class QGModel(Model):
       def __init__(self, modelparams: dict, dt: float):
             super().__init__(modelparams, dt)
-            self.xt_model, self.xf_model, self.init_state = self.make_qg(modelparams, dt)
+            self.stepped_model, self.init_state = self.make_qg(modelparams, dt)
             self.original_shape = self.init_state.state.q.shape
             self.curr_state = self.init_state
+
             self.roll_out_state = jax.jit(
+                  self._roll_out_state,
+                  static_argnames="num_steps"
+            )
+
+            self.roll_out_state_batch = jax.jit(
                   jax.vmap(self._roll_out_state, in_axes=(0, None)),
                   static_argnames="num_steps"
             )
@@ -356,60 +362,67 @@ class QGModel(Model):
             def loop_fn(carry, _state):
                   current_state = carry
                   
-                  next_state = self.xf_model.step_model(current_state)
+                  next_state = self.stepped_model.step_model(current_state)
             
                   return next_state, next_state
       
-            final_state, _ = jax.lax.scan(
+            final_state, traj_steps = jax.lax.scan(
                   loop_fn, state, None, length=num_steps
             )
             
-            return final_state      
+            return final_state, traj_steps
 
       @functools.partial(jax.jit, static_argnames=["self", "steps"])
       def forecast_rollout(self, x: np.ndarray, steps: int) -> tuple[np.ndarray, int]:
             
             model_error = 0
+            Nx = x.shape[0]
+            
+            x_shaped = jnp.array(x.reshape(self.original_shape)).astype(jnp.float32)
+
+            model_state = self.curr_state.state.update(q=x_shaped)
+            ab3_model_state = self.curr_state.update(state=model_state)
+            x = ab3_model_state
+
+            final_state, traj_steps = self.roll_out_state(x, steps)
+            
+            #Roll out the forecast and return the entire trajectory
+            tmp = traj_steps.state.q
+            ntime, nlayers, nx, ny = tmp.shape
+            tmp = tmp.reshape(ntime, Nx).T
+
+            model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
+            
+            return tmp, model_error
+      
+      def forecast(self, x: np.ndarray, steps: int)-> tuple[np.ndarray, int]:
+
+            model_error = 0
+            Nx = x.shape[0]
             
             x_shaped = x.reshape(self.original_shape)
             x_shaped = jnp.array(x_shaped)
             x_shaped = x_shaped.astype(jnp.float32)
 
             model_state = self.curr_state.state.update(q=x_shaped)
-            ab3_model_state = self.xt_model.initialize_stepper_state(model_state)
+            ab3_model_state = self.curr_state.update(state=model_state)
             x = ab3_model_state
-            
-            def loop_fn(carry, _x_shaped):
-                  current_state = carry
-                  
-                  next_state = self.xt_model.step_model(current_state)
-            
-                  return next_state, next_state
-      
-            _final_carry, traj_steps = jax.lax.scan(
-                  loop_fn, x, None, length=steps
-                  )
-            
-            #Need to reshape final output to match required format
-            tmp = traj_steps.state.q
-            ntime, nlayers, nx, ny = tmp.shape
-            tmp = tmp.reshape(ntime, nlayers * nx * ny).T
+
+            #Roll out the forecast and return the final state only            
+            final_state, traj_steps = self.roll_out_state(x, steps)
+            tmp = final_state.state.q.reshape(Nx).T
+
+            model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
             
             return tmp, model_error
-      
-      def forecast(self, x: np.ndarray, steps: int)-> tuple[np.ndarray, int]:
-            tmp, model_error = self.forecast_rollout(x, steps)
-            return tmp[:, -1], model_error
-
-      
 
       def forecast_batch(self, x_ens: np.ndarray, steps: int)-> tuple[np.ndarray, np.ndarray]: 
 
             Nx, Ne = x_ens.shape
             model_error = 0
 
-            #Need code that transforms x_ens into a usable multistate format
-            #Test this out in PyQG_test, then implement
+            #Turn the numpy array into an AB3State variable that can be forecasted
+            #Using PyQG-jax
             nlayers, nx, ny = self.original_shape
             x_ens_shaped = jnp.array(
                   x_ens.reshape(nlayers, nx, ny, Ne).transpose(3, 0, 1, 2)
@@ -418,32 +431,40 @@ class QGModel(Model):
             model_state = self.curr_states.state.update(q=x_ens_shaped)
             ab3_model_state = self.curr_states.update(state=model_state)
             x = ab3_model_state
-            # .update(
-            #       t=np.zeros(Ne, dtype=np.float32),
-            #       tc=jnp.zeros(Ne, dtype=jnp.uint32),
-            # )
 
-            final_state = self.roll_out_state(x, steps)
+            #Roll out the forecast and return the final state only
+            final_state, traj_steps = self.roll_out_state_batch(x, steps)
             tmp = final_state.state.q.transpose(1, 2, 3, 0).reshape(Nx, Ne)
+
+            model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
             
             return tmp, model_error
 
       def forecast_batch_rollout(self, x_ens: np.ndarray, steps: int)-> tuple[np.ndarray, np.ndarray]:
             # Nx, Ne = x_ens.shape
 
-            x_ens_T = x_ens.T
+            Nx, Ne = x_ens.shape
+            model_error = 0
 
-            def single_forecast(x):
-                  return self.forecast_rollout(x, steps=steps)
+            #Turn the numpy array into an AB3State variable that can be forecasted
+            #Using PyQG-jax
+            nlayers, nx, ny = self.original_shape
+            x_ens_shaped = jnp.array(
+                  x_ens.reshape(nlayers, nx, ny, Ne).transpose(3, 0, 1, 2)
+            ).astype(jnp.float32)
 
-            x_fore, model_errors = jax.vmap(single_forecast)(x_ens_T)
+            model_state = self.curr_states.state.update(q=x_ens_shaped)
+            ab3_model_state = self.curr_states.update(state=model_state)
+            x = ab3_model_state
 
-            x_fore = jnp.transpose(x_fore, (1,2,0))
+            #Roll out the forecast and return the entire trajectory
+            final_state, traj_steps = self.roll_out_state_batch(x, steps)
+            tmp = traj_steps.state.q.transpose(1, 2, 3, 0).reshape(Nx, Ne)
             
-            return x_fore, model_errors
+            model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
+            
+            return tmp, model_error
 
-      #Should each model start from a different or the same init condition?
-      #add in init_condition function
       def make_qg(self, kwargs, dt):
             nx        = kwargs['nx']
             ny        = kwargs['ny']
@@ -466,35 +487,28 @@ class QGModel(Model):
             
             self.Nx = nx*ny*2
 
-            #Try with new values for rd, H1, delta, U1. I think it was set for ocean before owing to slow speeds
             base_model = pyqg_jax.qg_model.QGModel(nx=nx, ny=ny, L=L, W=W, rek=rek, filterfac=filterfac, f=f, g=g, beta=beta, rd=rd, delta=delta, H1=H1, U1=U1, U2=U2, precision=precision)
 
             stepper = pyqg_jax.steppers.AB3Stepper(dt=dt)
 
-            xt_model = pyqg_jax.steppers.SteppedModel(
-                  base_model, stepper
-            )
-
-            xf_model = pyqg_jax.steppers.SteppedModel(
+            stepped_model = pyqg_jax.steppers.SteppedModel(
                   base_model, stepper
             )
             
-            init_state = xt_model.create_initial_state(
+            init_state = stepped_model.create_initial_state(
                   jax.random.key(0)
             )
 
-            return xt_model, xf_model, init_state
+            return stepped_model, init_state
 
       def init_condition(self, rng, Ne) -> tuple[np.ndarray, np.ndarray]:     
 
             init_rngs = jnp.broadcast_to(jax.random.key(0), (Ne,))
-            self.init_states = jax.vmap(self.xf_model.create_initial_state)(init_rngs)
+            self.init_states = jax.vmap(self.stepped_model.create_initial_state)(init_rngs)
             xt_0 = self.init_state.state.q.reshape(self.Nx,)
 
             xf_0 = self.init_states.state.q.transpose(1, 2, 3, 0).reshape(self.Nx, Ne) + 1e-8*rng.standard_normal((self.Nx, Ne))
 
             self.curr_states = self.init_states  
-
-            # xf_0 = xt_0[:, np.newaxis] + 1e-8*rng.standard_normal((self.Nx, Ne))
 
             return xf_0, xt_0
