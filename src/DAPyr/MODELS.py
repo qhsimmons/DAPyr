@@ -346,6 +346,16 @@ class QGModel(Model):
             self.original_shape = self.init_state.state.q.shape
             self.curr_state = self.init_state
 
+            self.roll_out_last_state = jax.jit(
+                  self._roll_out_last_state,
+                  static_argnames="num_steps"
+            )
+
+            self.roll_out_last_state_batch = jax.jit(
+                  jax.vmap(self._roll_out_last_state, in_axes=(0, None)),
+                  static_argnames="num_steps"
+            )
+
             self.roll_out_state = jax.jit(
                   self._roll_out_state,
                   static_argnames="num_steps"
@@ -356,6 +366,21 @@ class QGModel(Model):
                   static_argnames="num_steps"
             )
             return
+
+      def _roll_out_last_state(self, state, num_steps):
+
+            def loop_fn(carry, _state):
+                  current_state = carry
+                  
+                  next_state = self.stepped_model.step_model(current_state)
+            
+                  return next_state, None
+      
+            final_state, traj_steps = jax.lax.scan(
+                  loop_fn, state, None, length=num_steps
+            )
+            
+            return final_state, traj_steps
 
       def _roll_out_state(self, state, num_steps):
 
@@ -409,7 +434,7 @@ class QGModel(Model):
             x = ab3_model_state
 
             #Roll out the forecast and return the final state only            
-            final_state, traj_steps = self.roll_out_state(x, steps)
+            final_state, traj_steps = self.roll_out_last_state(x, steps)
             tmp = final_state.state.q.reshape(Nx).T
 
             model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
@@ -433,7 +458,7 @@ class QGModel(Model):
             x = ab3_model_state
 
             #Roll out the forecast and return the final state only
-            final_state, traj_steps = self.roll_out_state_batch(x, steps)
+            final_state, traj_steps = self.roll_out_last_state_batch(x, steps)
             tmp = final_state.state.q.transpose(1, 2, 3, 0).reshape(Nx, Ne)
 
             model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
@@ -503,11 +528,13 @@ class QGModel(Model):
 
       def init_condition(self, rng, Ne) -> tuple[np.ndarray, np.ndarray]:     
 
-            init_rngs = jnp.broadcast_to(jax.random.key(0), (Ne,))
+
+            init_rngs = jnp.stack(jax.random.split(jax.random.key(0), Ne))
             self.init_states = jax.vmap(self.stepped_model.create_initial_state)(init_rngs)
+
             xt_0 = self.init_state.state.q.reshape(self.Nx,)
 
-            xf_0 = self.init_states.state.q.transpose(1, 2, 3, 0).reshape(self.Nx, Ne) + 1e-8*rng.standard_normal((self.Nx, Ne))
+            xf_0 = self.init_states.state.q.transpose(1, 2, 3, 0).reshape(self.Nx, Ne)
 
             self.curr_states = self.init_states  
 

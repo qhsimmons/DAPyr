@@ -13,6 +13,7 @@ from . import MISC
 from . import DA
 from . import OBS_ERRORS
 from . import INFLATION
+from . import OBS_OPS
 import xarray as xr
 from . import Exceptions as dapExceptions
 import pickle
@@ -113,15 +114,16 @@ class Expt:
                   rng = np.random.default_rng(seed)
             else:
                   rng = np.random.default_rng()
+
             xf_0, xt_0 = self.model.init_condition(rng, Ne)
-            xt_0, model_error = self.model.forecast(xt_0, 100)
+            xt_0, model_error = self.model.forecast(xt_0, 7500)
             if model_error != 0:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
 
             #Multiprocessing (pool is owned and managed by self.model)
             # xf_0 = xt_0[:, np.newaxis] + 1*rng.standard_normal((Nx, Ne))
-            xf_0, model_errors = self.model.forecast_batch(xf_0, 100)
+            xf_0, model_errors = self.model.forecast_batch(xf_0, 7500)
             if np.any(model_errors != 0):
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
@@ -138,17 +140,8 @@ class Expt:
             true_obs_err_dist = self.getParam('true_obs_err_dist')
             true_obs_err_params = self.getParam('true_obs_err_params')
 
-            match h_flag:
-                  case 0:
-                        Y_perf = np.matmul(H,xt)[:, :, np.newaxis]
-                  case 1:
-                        Y_perf = np.matmul(H, xt**2 )[:, :, np.newaxis] 
-                  case 2:
-                        Y_perf = np.matmul(H, np.log(np.abs(xt)))[:, :, np.newaxis] 
-                  case _:
-                        raise ValueError(f'Invalid Option Selected for Measurement Operator h: {h_flag}')
+            Y = self.obs_op.create_obs(xt, true_obs_err_dist, true_obs_err_params, rng)
 
-            Y = Y_perf + OBS_ERRORS.sample_errors(Y_perf, true_obs_err_dist, true_obs_err_params, rng)
             return xf_0, xt, Y
 
       def _configModel(self):
@@ -180,8 +173,21 @@ class Expt:
       def _configObs(self):
             #Extra Observation stuff
             Nx = self.modelParams['Nx']
-            H = np.eye(Nx) #Linear Measurement Operator
-            H = H[self.obsParams['obb']:Nx-self.obsParams['obb']:self.obsParams['obf'], :]
+            match self.getParam('h_flag'):
+                  case 0: #1D Linear
+                        self.obs_op = OBS_OPS.Linear(self.obsParams, Nx)
+                        H = self.obs_op.H
+                  case 1: #1D Squared
+                        self.obs_op = OBS_OPS.Squared(self.obsParams, Nx)
+                        H = self.obs_op.H
+                  case 2: #1D Log
+                        self.obs_op = OBS_OPS.Log(self.obsParams, Nx)
+                        H = self.obs_op.H
+                  case 3: #3D Linear
+                        self.obs_op = OBS_OPS.Linear3D(self.obsParams, self.modelParams, Nx)
+                        H = self.obs_op.H
+            # H = np.eye(Nx) #Linear Measurement Operator
+            # H = H[self.obsParams['obb']:Nx-self.obsParams['obb']:self.obsParams['obf'], :]
             self.obsParams['H'] = H
             Ny = len(H)
             self.obsParams['Ny'] = Ny
@@ -193,7 +199,17 @@ class Expt:
                   self.obsParams['var_infs_y'] = np.ones((Ny,))*init_infs
             #Create localization matrices
             if self.obsParams['localize']==1:
-                  C = MISC.create_periodic(self.obsParams['roi'], Nx, 1/Nx)
+                  if self.modelParams['model_flag'] == 3:
+                        s_x = self.obsParams['roi_x']
+                        s_y = self.obsParams['roi_y']
+                        s_z = self.obsParams['roi_z']
+                        m_z, m_x, m_y = self.model.original_shape
+                        dx  = self.model.stepped_model.model.L / self.model.stepped_model.model.nx
+                        dy  = self.model.stepped_model.model.W / self.model.stepped_model.model.ny
+                        dz  = float((self.model.stepped_model.model.Hi[0] + self.model.stepped_model.model.Hi[1])/2.)
+                        C = self.obs_op.create_periodic(s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz)
+                  else:
+                        C = self.obs_op.create_periodic(self.obsParams['roi'], Nx, 1/Nx)
                   #C_kf = MISC.create_periodic(self.obsParams['roi_kf'], Nx, 1/Nx)
                   #C_pf = MISC.create_periodic(self.obsParams['roi_pf'], Nx, 1/Nx)
             else:
@@ -258,6 +274,8 @@ class Expt:
                         self.basicParams['dt'] = 0.05
                   case 2: #L05
                         self.basicParams['dt'] = 0.05
+                  case 3: #QG
+                        self.basicParams['dt'] = 14400
                   case _: #None Case
                         self.basicParams['dt'] = 0.01
             self.basicParams['Ne'] = 10
@@ -269,10 +287,15 @@ class Expt:
             #Model steps between observations
             self.obsParams['tau'] = 1 
             self.obsParams['obf'] = 1   #Observation spatial frequency: spacing between variables
+            self.obsParams['obf_x'] = 1 #Observation spatial frequency in x: spacing in x between variables for 2D+ case
+            self.obsParams['obf_y'] = 1 #Observation spatial frequency in y: spacing in y between variables for 2D+ case
             self.obsParams['obb'] = 0   #Observation buffer: number of variables to skip when generating obs
             #Localization
             self.obsParams['localize'] = 1
             self.obsParams['roi'] = 0.005
+            self.obsParams['roi_x'] = 10000
+            self.obsParams['roi_y'] = 10000
+            self.obsParams['roi_z'] = 150
             #EnKF Parameters
             self.obsParams['inf_flag'] = 0 #Default No Inflation
             self.obsParams['gamma'] = 0.30
@@ -426,6 +449,8 @@ class Expt:
             tau: {self.obsParams['tau']} # Number of model time steps between data assimilation cycles
             obb: {self.obsParams['obb']} # Observation buffer: number of variables to skip when generating obs
             obf: {self.obsParams['obf']} # Observation spatial frequency: spacing between variables
+            obf_x: {self.obsParams['obf_x']} #Observation spatial frequency in x: spacing in x between variables for 2D+ case
+            obf_y: {self.obsParams['obf_y']} #Observation spatial frequency in y: spacing in y between variables for 2D+ case
             Ny: {self.obsParams['Ny']} # Number of observations to assimilate each cycle
             obf: {self.obsParams['obf']} # Observation spatial frequency: spacing between variables
             Ny: {self.obsParams['Ny']} # Number of observations to assimilate each cycle
@@ -446,6 +471,9 @@ class Expt:
                   0: Off
                   1: On
             roi: {self.getParam('roi')} # Localization Radius
+            roi_x: {self.getParam('roi_x')} # Localization Radius in x direction for 3D case
+            roi_y: {self.getParam('roi_y')} # Localization Radius in y direction for 3D case
+            roi_z: {self.getParam('roi_y')} # Localization Radius in z direction for 3D case
             -----Kalman Filter (EnSRF)-----
             inf_flag: {self.getParam('inf_flag')} # Inflation Method
                   0: No Inflation
@@ -1077,13 +1105,14 @@ def runDA(expt: Expt, maxT : int = None):
             spread[t, 0] = np.sqrt(np.mean(np.sum((xf - xm)**2, axis = -1)/(Ne - 1)))
             if saveForecastEns:
                   x_fore_ens[:, :, t] = xf
-            match h_flag:
-                  case 0:
-                        hx = np.matmul(H, xf)
-                  case 1:
-                        hx = np.matmul(H, np.square(xf))
-                  case 2:
-                        hx = np.matmul(H, np.log(np.abs(xf)))
+            # match h_flag:
+            #       case 0:
+            #             hx = np.matmul(H, xf)
+            #       case 1:
+            #             hx = np.matmul(H, np.square(xf))
+            #       case 2:
+            #             hx = np.matmul(H, np.log(np.abs(xf)))
+            hx = expt.obs_op.apply_H(xf)
 
             hxm = np.mean(hx, axis = -1)[:, None]
             qaqcpass = np.zeros((Ny,))
@@ -1106,7 +1135,7 @@ def runDA(expt: Expt, maxT : int = None):
                         else:
                               xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
                   case 1: #LPF
-                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
+                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, gamma, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
                   case 2: # Nothing
                         xa = xf
 
