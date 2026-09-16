@@ -287,15 +287,21 @@ def lpf_update(x : np.ndarray, hx : np.ndarray,
 
 def var_update(x, hx, y, HC, HCH, B, R, ntmax):
 
+    #Error flag
     e_flag = 0
 
+    #State parameters
     Nx, Ne = x.shape
     Ny = y.shape
 
-    cv = np.zeros(Nx)
-    d = y - hx
+    cv = np.zeros(Nx) #Starting incremements (zero for now)
+    d = y - hx        # Departure of obs from background. Here is hwere
+                      # you can use a nonlinear operator if applicable
+                      
+    #Estimate the inverse of R
     R_i = np.linalg.inv(R + 1e-7 + np.eye(Ny))
 
+    #Estimate the square root of B
     U, S, Vh = np.linalg.svd(B)
     S[S < 0] = 0
     Bsqrt = (U * np.sqrt(S)) @ Vh

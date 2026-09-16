@@ -305,6 +305,8 @@ class Expt:
             self.obsParams['min_res'] = 0.0
             self.obsParams['maxiter'] = 1
             self.obsParams['Nt_eff'] = 0.4
+            #Var Parameters
+            self.obsParams['ntmax'] = 80
 
             #Observation Error Distribution Parameters
             default_gaussian_params = {'mu': 0, 'sigma' : 1}
@@ -430,7 +432,8 @@ class Expt:
             model_flag: {self.modelParams['model_flag']} # Model used in forward integration
                   0: Lorenz 1963 (Nx = 3)
                   1: Lorenz 1996 (Nx = 40)
-                  2: Lorenz 2005 (Nx  = 480)
+                  2: Lorenz 2005 (Nx = 480)
+                  3: PyQG-jax    (Nx = 8192)
             Nx: {self.modelParams['Nx']} # The number of state variables
             
             params: {self.modelParams['model_params']} # Parameters to tune each forecast model
@@ -438,6 +441,9 @@ class Expt:
                   Lorenz 1963: [s, r, b]
                   Lorenz 1996: [F]
                   Lorenz 2005: [l05_F, l05_Fe, l05_K, l05_I, l05_b, l05_c]
+                  PyQG-jax:    [nx: 64, ny:64, L:1e6, W:None, rek:5.787e-7, filterfac:23.6, f:None, g:9.81,
+                                beta:1.5e-11, rd:15000, delta:0.25, H1:500, U1:0.025, U2:0.0,
+                                precision:pyqg_jax.state.Precision.DOUBLE]
 
             ------------------------
             Observation Information
@@ -490,6 +496,9 @@ class Expt:
             maxiter: {self.getParam('maxiter')} # Maximum number of tempering iterations to run
             min_res: {self.getParam('min_res')} # Minimum residual
             Nt_eff: {self.getParam('Nt_eff')} # Effective Ensemble Size
+
+            -----3D Var-----
+            ntmax: {self.getParam('ntmax')} # How many iterations to perform when minimizing the cost function
             ------------------------
             Miscellaneous Information
             ------------------------
@@ -1022,6 +1031,7 @@ def runDA(expt: Expt, maxT : int = None):
       infs_y = expt.getParam('infs_y')
       var_infs = expt.getParam('var_infs')
       var_infs_y = expt.getParam('var_infs_y')
+      ntmax = expt.getParams('ntmax')
 
       #Flags
       h_flag, expt_flag= expt.getParam('h_flag'), expt.getParam('expt_flag')
