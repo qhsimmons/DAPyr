@@ -33,6 +33,109 @@ def create_periodic(sigma, m, dx):
       B = np.where(B < 0, 0, B)
       return B
 
+def create_spherical_periodic(s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz, dtype=np.float32):
+    """
+    Create an anisotropic 3D localization matrix.
+
+    State ordering:
+        (layer, x, y)
+
+    x and y are periodic.
+    z/layer is non-periodic.
+
+    The resulting matrix has the structure
+
+        B = B_z ⊗ B_h
+
+    where B_h is the horizontal localization matrix and
+    B_z is the vertical localization matrix.
+    """
+
+    # Number of horizontal grid points
+    N_h = m_x * m_y
+
+    # Total number of state variables
+    N = m_z * N_h
+
+    # ---------------------------------------------------------
+    # Horizontal periodic distances
+    # ---------------------------------------------------------
+
+    x_dist = np.minimum(
+        np.arange(m_x),
+        m_x - np.arange(m_x)
+    )
+
+    y_dist = np.minimum(
+        np.arange(m_y),
+        m_y - np.arange(m_y)
+    )
+
+    # Convert to physical distances
+    x_dist = dx * x_dist
+    y_dist = dy * y_dist
+
+    # ---------------------------------------------------------
+    # Horizontal localization kernel
+    # ---------------------------------------------------------
+
+    x_dist = x_dist[:, None]
+    y_dist = y_dist[None, :]
+
+    kernel_h = np.exp(
+        -0.5 * (
+            (x_dist / s_x)**2 +
+            (y_dist / s_y)**2
+        )
+    ).astype(dtype)
+
+    # ---------------------------------------------------------
+    # Construct horizontal localization matrix
+    # ---------------------------------------------------------
+
+    B_h = np.empty(
+        (N_h, N_h),
+        dtype=dtype
+    )
+
+    row = 0
+
+    for i in range(m_x):
+        for j in range(m_y):
+
+            weights = np.roll(
+                kernel_h,
+                shift=(i, j),
+                axis=(0, 1)
+            )
+
+            B_h[row, :] = weights.ravel()
+
+            row += 1
+
+    # ---------------------------------------------------------
+    # Vertical/layer localization matrix
+    # ---------------------------------------------------------
+
+    layer_dist = np.abs(
+        np.arange(m_z)[:, None] -
+        np.arange(m_z)[None, :]
+    )
+
+    layer_dist = dz * layer_dist
+
+    B_z = np.exp(
+        -0.5 * (layer_dist / s_z)**2
+    ).astype(dtype)
+
+    # ---------------------------------------------------------
+    # Combine vertical and horizontal localization
+    # ---------------------------------------------------------
+
+    B = np.kron(B_z, B_h)
+
+    return B
+
 def find_beta(sum_exp, Neff):
     #sum_exp is of size Ne
     Ne = sum_exp.shape[0]
@@ -187,3 +290,83 @@ def kddm(x, xo, w):
         warnings.warn("NaN values detected in qf")
     
     return xa
+
+def gen_be(sigma, amp, m, dx):
+    x = np.arange(1, m+1)
+
+    # Create index array
+    x1, x2 = np.meshgrid(x, x)
+    x1 *= dx
+    x2 *= dx
+    B = amp*np.exp( - ((x1-x2)**2) / (2*sigma**2))
+    return B
+
+def gradJ(xb, v, cv, inov, U, R_inv, H):
+
+    g = cv + v
+    g = g + U.T@H.T@R_inv@(H@U@v - inov)
+    return g
+
+
+def cg_minimize(xg, xb, cv, inov, R_i, U, H, ntmax):
+
+    # Set inner-loop control variable and x to zero
+    v   = cv*0
+    xv  = xg*0
+
+    # Set initial d and r to be negative the gradient
+    d = -1*gradJ(xb, v, cv, inov, U, R_i, H)
+    r = d
+
+    norm = np.zeros(ntmax+2)
+    J    = np.zeros(ntmax+1)
+    
+    gdot0   = d @ d
+    gdot1   = gdot0
+    norm[0] = np.sqrt(gdot1)
+
+    # disp([])
+    #disp(['Target gradient norm will be ',num2str(norm(1)*1e-4)])
+    #disp(' ')
+
+    for i in range(1, ntmax+2):
+
+        # Calculate Jb
+        Jb = (cv + v) @ (cv + v) /2.0
+
+        # Calculate Jo
+        Jo = ( H@U@v - inov ).T @ R_i @ ( H@U@v - inov ) / 2.
+
+        norm[i] = np.sqrt(gdot1)
+
+        # disp([])
+        # disp(['Iteration: ', num2str(i-1),' Grad J: ',num2str(norm(i+1)),' Jb: ',num2str(Jb),' Jo: ',num2str(Jo)])
+
+        J[i-1] = Jb + Jo
+
+        # Transform back to model space
+        xcv = U@cv
+        xv = U@v
+
+        if norm[i]<norm[1]*1e-8:
+            break
+
+        # Calculate A*d
+        dum1 = cv*0
+        dum2 = inov*0
+        Ad = gradJ(xb, d, dum1, dum2, U, R_i, H)
+
+        # Update CG variables
+        a = gdot1 / (d.T@Ad)
+        r = r - a*Ad
+        v = v + a*d
+        gdot0 = gdot1
+        gdot1 = r@r
+        bet   = gdot1/gdot0
+        d     = r + bet*d
+
+    xcv = xcv + xv
+    cv  = cv  + v
+    
+    return xcv, cv, J
+

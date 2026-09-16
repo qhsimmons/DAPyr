@@ -403,7 +403,7 @@ class QGModel(Model):
             model_error = 0
             Nx = x.shape[0]
             
-            x_shaped = jnp.array(x.reshape(self.original_shape)).astype(jnp.float32)
+            x_shaped = jnp.array(x.reshape(self.original_shape)).astype(jnp.float64)
 
             model_state = self.curr_state.state.update(q=x_shaped)
             ab3_model_state = self.curr_state.update(state=model_state)
@@ -427,7 +427,7 @@ class QGModel(Model):
             
             x_shaped = x.reshape(self.original_shape)
             x_shaped = jnp.array(x_shaped)
-            x_shaped = x_shaped.astype(jnp.float32)
+            x_shaped = x_shaped.astype(jnp.float64)
 
             model_state = self.curr_state.state.update(q=x_shaped)
             ab3_model_state = self.curr_state.update(state=model_state)
@@ -451,14 +451,14 @@ class QGModel(Model):
             nlayers, nx, ny = self.original_shape
             x_ens_shaped = jnp.array(
                   x_ens.reshape(nlayers, nx, ny, Ne).transpose(3, 0, 1, 2)
-            ).astype(jnp.float32)
+            ).astype(jnp.float64)
 
             model_state = self.curr_states.state.update(q=x_ens_shaped)
             ab3_model_state = self.curr_states.update(state=model_state)
             x = ab3_model_state
 
             #Roll out the forecast and return the final state only
-            final_state, traj_steps = self.roll_out_last_state_batch(x, steps)
+            final_state, _ = self.roll_out_last_state_batch(x, steps)
             tmp = final_state.state.q.transpose(1, 2, 3, 0).reshape(Nx, Ne)
 
             model_error = jnp.any(jnp.isnan(tmp)).astype(jnp.int32)
@@ -476,7 +476,7 @@ class QGModel(Model):
             nlayers, nx, ny = self.original_shape
             x_ens_shaped = jnp.array(
                   x_ens.reshape(nlayers, nx, ny, Ne).transpose(3, 0, 1, 2)
-            ).astype(jnp.float32)
+            ).astype(jnp.float64)
 
             model_state = self.curr_states.state.update(q=x_ens_shaped)
             ab3_model_state = self.curr_states.update(state=model_state)

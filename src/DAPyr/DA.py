@@ -285,6 +285,27 @@ def lpf_update(x : np.ndarray, hx : np.ndarray,
             break
     return x, e_flag
 
+def var_update(x, hx, y, HC, HCH, B, R, ntmax):
+
+    e_flag = 0
+
+    Nx, Ne = x.shape
+    Ny = y.shape
+
+    cv = np.zeros(Nx)
+    d = y - hx
+    R_i = np.linalg.inv(R + 1e-7 + np.eye(Ny))
+
+    U, S, Vh = np.linalg.svd(B)
+    S[S < 0] = 0
+    Bsqrt = (U * np.sqrt(S)) @ Vh
+    Bsqrt[Bsqrt < 0] = 0
+
+    xcv, _, _ = MISC.cg_minimize(x, x, cv, d, R_i, Bsqrt, HC, ntmax)
+
+    xa = x + xcv
+    return xa, e_flag
+
 def _pf_merge(x, xs, loc, Ne, xmpf, var_a, alpha):
     '''Performs the merge step of the Local Particle Filter
     

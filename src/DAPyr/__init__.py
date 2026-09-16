@@ -203,7 +203,7 @@ class Expt:
                         s_x = self.obsParams['roi_x']
                         s_y = self.obsParams['roi_y']
                         s_z = self.obsParams['roi_z']
-                        m_z, m_x, m_y = self.model.original_shape
+                        m_z, m_y, m_x = self.model.original_shape
                         dx  = self.model.stepped_model.model.L / self.model.stepped_model.model.nx
                         dy  = self.model.stepped_model.model.W / self.model.stepped_model.model.ny
                         dz  = float((self.model.stepped_model.model.Hi[0] + self.model.stepped_model.model.Hi[1])/2.)
@@ -322,7 +322,7 @@ class Expt:
                       'l05_F':15, 'l05_Fe':15,
                       'l05_K':32, 'l05_I':12, 
                       'l05_b':10.0, 'l05_c':2.5,
-                      'nx': 64, 'ny':None, 'L':1e6,
+                      'nx': 64, 'ny':64, 'L':1e6,
                       'W':None, 'rek':5.787e-7,
                       'filterfac':23.6, 'f':None, 'g':9.81,
                       'beta':1.5e-11, 'rd':15000, 'delta':0.25,
@@ -1002,6 +1002,8 @@ def runDA(expt: Expt, maxT : int = None):
                   raise ValueError('maxT greater than T in experiment ({} > {})'.format(maxT, T))
             T = maxT
 
+      #Calculate B from experiment spinup
+
       #Observation Parameters
       H = expt.getParam('H')
       Ny = expt.getParam('Ny')
@@ -1100,6 +1102,8 @@ def runDA(expt: Expt, maxT : int = None):
 
       for t in range(T):
             #Observation
+            if t % 10 == 0:
+                  print(t)
             xm = np.mean(xf, axis = -1)[:, np.newaxis]
             rmse_prior[t] = np.sqrt(np.mean((xt[:, t] - xm[:, 0])**2))
             spread[t, 0] = np.sqrt(np.mean(np.sum((xf - xm)**2, axis = -1)/(Ne - 1)))
@@ -1136,7 +1140,9 @@ def runDA(expt: Expt, maxT : int = None):
                               xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
                   case 1: #LPF
                         xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, gamma, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
-                  case 2: # Nothing
+                  case 2: # 3d var update
+                        xa, e_flag = DA.var_update(xf, hx, Y[:, t], C, HC, B, R, ntmax)
+                  case 3: # Do Nothing
                         xa = xf
 
             if e_flag != 0:

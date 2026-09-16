@@ -112,12 +112,12 @@ class Linear3D():
         Y = Y_perf + OBS_ERRORS.sample_errors(Y_perf, true_obs_err_dist, true_obs_err_params, rng)
         return Y
 
-    def create_periodic(self, s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz, dtype=np.float32):
+    def create_periodic(self, s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz, dtype=np.float64):
         """
         Create an anisotropic 3D localization matrix.
 
         State ordering:
-            (layer, x, y)
+            (layer, y, x)
 
         x and y are periodic.
         z/layer is non-periodic.
@@ -142,20 +142,25 @@ class Linear3D():
         y_dist = dy * y_dist
 
         # Horizontal localization kernel
-        x_dist = x_dist[:, None]
-        y_dist = y_dist[None, :]
+        x_dist = x_dist[None, :]
+        y_dist = y_dist[:, None]
 
-        kernel_h = np.exp(-0.5 * ((x_dist / s_x)**2 + (y_dist / s_y)**2)).astype(dtype)
+        kernel_h = np.exp(
+            -0.5 * (
+                (y_dist / s_y)**2 +
+                (x_dist / s_x)**2
+            )
+        ).astype(dtype)
 
         # Construct horizontal localization matrix
         B_h = np.empty((N_h, N_h), dtype=dtype)
 
         row = 0
 
-        for i in range(m_x):
-            for j in range(m_y):
+        for j in range(m_y):
+            for i in range(m_x):
 
-                weights = np.roll(kernel_h, shift=(i, j), axis=(0, 1))
+                weights = np.roll(kernel_h, shift=(j, i), axis=(0, 1))
 
                 B_h[row, :] = weights.ravel()
 
@@ -170,6 +175,8 @@ class Linear3D():
 
         # Combine vertical and horizontal localization
         B = np.kron(B_z, B_h)
+
+        # B = np.ones((m_x*m_y*m_z, m_x*m_y*m_z))
 
         return B
 
