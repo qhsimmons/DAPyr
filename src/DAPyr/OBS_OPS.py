@@ -174,11 +174,23 @@ class Linear3D():
         B_z = np.exp(-0.5 * (layer_dist / s_z)**2).astype(dtype)
 
         # Combine vertical and horizontal localization
-        B = np.kron(B_z, B_h)
 
+        # Take square roots to create square root matrix
+        U, S, Vh = np.linalg.svd(B_z)
+        S[S < 0] = 0
+        sqrt_B_z = (U * np.sqrt(S)) @ Vh
+        sqrt_B_z[sqrt_B_z < 0] = 0
+
+        U, S, Vh = np.linalg.svd(B_h)
+        S[S < 0] = 0
+        sqrt_B_h = (U * np.sqrt(S)) @ Vh
+        sqrt_B_h[sqrt_B_h < 0] = 0        
+
+        B = np.kron(B_z, B_h)
+        sqrt_B = np.kron(sqrt_B_z, sqrt_B_h)
         # B = np.ones((m_x*m_y*m_z, m_x*m_y*m_z))
 
-        return B
+        return B, sqrt_B
 
     def apply_H(self, x):
         hx = np.matmul(self.H, x)

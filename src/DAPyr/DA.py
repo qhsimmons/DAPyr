@@ -4,6 +4,7 @@ from . import MISC
 from . import INFLATION
 import warnings
 import functools
+import jax
 
 #TODO Clean up and comment inside functions
 
@@ -46,7 +47,6 @@ def EnSRF_update(xf : np.ndarray, hx : np.ndarray,
     **kwargs
         Extra arguments to `EnSRF_update` to pass to inflation parameters. See documentation for `EnSRF_update` for a list of all possible arguments.
     '''
-        
     if len(y.shape) == 1: #If Y is 1-dimensional, make it the correct dimension
         y = y[:, None]
 
@@ -285,31 +285,56 @@ def lpf_update(x : np.ndarray, hx : np.ndarray,
             break
     return x, e_flag
 
-def var_update(x, hx, y, HC, HCH, B, R, ntmax):
+def var_update(x, hx, y, H, sqrt_C, R, model, x_foreens, ntmax):
 
     #Error flag
     e_flag = 0
 
+    Ny = y.shape[0]
+    hxm = np.mean(hx, axis=-1)
+
+    if len(y.shape) == 1: #If Y is 1-dimensional, make it the correct dimension
+        y = y[:, None]
+
+    if len(y.shape) == 2: #If Y is 1-dimensional, make it the correct dimension
+        y = y[:, 0]
+
+    if y.shape != hxm.shape:
+        raise ValueError(
+            f"Observation and background shapes differ: "
+            f"{y.shape} != {hxm.shape}"
+        )
+
     #State parameters
     Nx, Ne = x.shape
-    Ny = y.shape
 
-    cv = np.zeros(Nx) #Starting incremements (zero for now)
-    d = y - hx        # Departure of obs from background. Here is hwere
-                      # you can use a nonlinear operator if applicable
+    # Get ensemble perturbations
+    x_mean = np.mean(x, axis=1)
+    x_diff = x - x_mean[:, None]
+    x_diff_mean = np.mean(x_diff, axis=1)
+    # print("Calculating Mt")
+    # _, dx = jax.jvp(model.forecast_rollout, (x_diff_mean,), (delta_x,))
+    # print(dx.shape)
+    # print("Done calculating dx")
+
+    #Get the tangent linear model operator here?
+
+    inov = y - hxm        # Departure of obs from background. Here is where
+                       # you can use a nonlinear operator if applicable
                       
     #Estimate the inverse of R
-    R_i = np.linalg.inv(R + 1e-7 + np.eye(Ny))
+    R_i = np.linalg.inv(R)
 
-    #Estimate the square root of B
-    U, S, Vh = np.linalg.svd(B)
-    S[S < 0] = 0
-    Bsqrt = (U * np.sqrt(S)) @ Vh
-    Bsqrt[Bsqrt < 0] = 0
+    apply_U = lambda v: MISC.apply_Ue(v, x_diff, sqrt_C)
+    apply_UT = lambda v: MISC.apply_Ue_T(v, x_diff, sqrt_C)
 
-    xcv, _, _ = MISC.cg_minimize(x, x, cv, d, R_i, Bsqrt, HC, ntmax)
+    cv = np.zeros((Nx, Ne)) #Starting incremements (zero for now)
 
-    xa = x + xcv
+    xcv, _, _ = MISC.cg_minimize(cv, inov, y, x, R_i, H, apply_U, apply_UT, x_diff_mean, model, x_fore_ens, ntmax)
+    # xcv = xcv_exact
+
+    xa = x + xcv[:, None]
+
     return xa, e_flag
 
 def _pf_merge(x, xs, loc, Ne, xmpf, var_a, alpha):

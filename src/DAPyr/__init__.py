@@ -4,6 +4,7 @@ __all__ = ['MISC', 'MODELS', 'DA', 'OBS_ERRORS']
 
 
 import numpy as np
+from scipy.linalg import sqrtm
 import multiprocessing as mp
 import copy
 import ast
@@ -20,6 +21,7 @@ import pickle
 import matplotlib.pyplot as plt
 import warnings
 import pyqg_jax
+
 
 from importlib import reload
 reload(OBS_ERRORS)
@@ -128,7 +130,7 @@ class Expt:
                   warnings.warn('Model integration failed.')
                   self.modExpt({'status': 'init model error'})
             #Create Model Truth
-            xt_0, _ = self.model.forecast(xt_0, 100)
+            # xt_0, _ = self.model.forecast(xt_0, 100)
             xt, model_error = self.model.forecast_rollout(xt_0, T*tau)
             #Subselect the values I need based on tau
             xt = xt[:, :-1:tau]
@@ -207,7 +209,7 @@ class Expt:
                         dx  = self.model.stepped_model.model.L / self.model.stepped_model.model.nx
                         dy  = self.model.stepped_model.model.W / self.model.stepped_model.model.ny
                         dz  = float((self.model.stepped_model.model.Hi[0] + self.model.stepped_model.model.Hi[1])/2.)
-                        C = self.obs_op.create_periodic(s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz)
+                        C, sqrt_C = self.obs_op.create_periodic(s_x, s_y, s_z, m_x, m_y, m_z, dx, dy, dz)
                   else:
                         C = self.obs_op.create_periodic(self.obsParams['roi'], Nx, 1/Nx)
                   #C_kf = MISC.create_periodic(self.obsParams['roi_kf'], Nx, 1/Nx)
@@ -216,7 +218,9 @@ class Expt:
                   C = np.ones((Nx, Nx))
                   #C_kf = np.ones((Nx, Nx))
                   #C_pf = np.ones((Nx, Nx))
-            self.obsParams['C'] = np.matmul(H, C)
+            self.obsParams['HC'] = np.matmul(H, C)
+            self.obsParams['C']  = C
+            self.obsParams['sqrt_C'] = sqrt_C
             #self.obsParams['C_kf'] = np.matmul(H, C_kf)
             #self.obsParams['C_pf'] = np.matmul(H, C_pf)
 
@@ -471,7 +475,8 @@ class Expt:
             expt_flag: {self.basicParams['expt_flag']} # DA method for update step
                   0: Ensemble Square Root Filter (EnSRF)
                   1: Local Particle Filter (LPF)
-                  2: No update (xa = xf)
+                  2: 3D var (var_update)
+                  3: No update (xa = xf)
                   ...
             localize: {self.getParam('localize')} # Determines whether to apply localization
                   0: Off
@@ -1017,12 +1022,14 @@ def runDA(expt: Expt, maxT : int = None):
       H = expt.getParam('H')
       Ny = expt.getParam('Ny')
       tau = expt.getParam('tau')
-      C = expt.getParam('C')
+      HC = expt.getParam('HC')
+      C  = expt.getParam('C')
+      sqrt_C = expt.getParam('sqrt_C')
       Nt_eff = expt.getParam('Nt_eff')
       min_res = expt.getParam('min_res')
       kddm_flag = expt.getParam('kddm_flag')
       maxiter = expt.getParam('maxiter')
-      HC =  np.matmul(C,H.T)
+      HCH =  np.matmul(HC,H.T)
       gamma = expt.getParam('gamma')
       assumed_obs_err_dist = expt.getParam('assumed_obs_err_dist')
       assumed_obs_err_params = expt.getParam('assumed_obs_err_params')
@@ -1031,7 +1038,7 @@ def runDA(expt: Expt, maxT : int = None):
       infs_y = expt.getParam('infs_y')
       var_infs = expt.getParam('var_infs')
       var_infs_y = expt.getParam('var_infs_y')
-      ntmax = expt.getParams('ntmax')
+      ntmax = expt.getParam('ntmax')
 
       #Flags
       h_flag, expt_flag= expt.getParam('h_flag'), expt.getParam('expt_flag')
@@ -1061,7 +1068,7 @@ def runDA(expt: Expt, maxT : int = None):
       # check if an observation error standard deviation was prescribed
       # this is necessary either if we are using a Kalman Filter variant
       # or if we are performing basic quality control on obs.
-      if expt_flag == 0:
+      if expt_flag == 0 or expt_flag == 2:
             if 'sigma' in assumed_obs_err_params:
                   var_y = assumed_obs_err_params['sigma'] ** 2
             else:
@@ -1110,10 +1117,22 @@ def runDA(expt: Expt, maxT : int = None):
       # Retrieve likelihood function (for use with LPF only)
       L = OBS_ERRORS.get_likelihood(assumed_obs_err_dist, assumed_obs_err_params)
 
+      # Estimate ensemble error covariance B from the first forecast state
+      print('Estimating B from first forecast state...')
+      x_first_prior = xf_0
+      x_first_prior_ensmean = np.mean(x_first_prior, -1)
+      x_first_prior_diff = x_first_prior - x_first_prior_ensmean[:, None]
+
+      # Assume independent obs
+      
+      R = (assumed_obs_err_params['sigma'] ** 2) * np.eye(Ny)
+      # R = (1e-5 ** 2) * np.eye(Ny)
+
       for t in range(T):
             #Observation
-            if t % 10 == 0:
+            if t % 1 == 0:
                   print(t)
+
             xm = np.mean(xf, axis = -1)[:, np.newaxis]
             rmse_prior[t] = np.sqrt(np.mean((xt[:, t] - xm[:, 0])**2))
             spread[t, 0] = np.sqrt(np.mean(np.sum((xf - xm)**2, axis = -1)/(Ne - 1)))
@@ -1142,16 +1161,35 @@ def runDA(expt: Expt, maxT : int = None):
             #CHECK Make DA update steps return the ensemble mean, make LPF return xmpf specifically
             match expt_flag:
                   case 0: #Deterministic EnKF
-                        da_results = DA.EnSRF_update(xf, hx, Y[:, t], C, HC, var_y, inf_flag, e_flag, qaqcpass, 
+                        da_results = DA.EnSRF_update(xf, hx, Y[:, t], HC, HCH, var_y, inf_flag, e_flag, qaqcpass, 
                                                      infs = infs, infs_y = infs_y, var_infs = var_infs, var_infs_y = var_infs_y, gamma = gamma)
                         if len(da_results) == 2:
                               xa, e_flag = da_results
                         else:
                               xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
                   case 1: #LPF
-                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, C, Nt_eff*Ne, gamma, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
+                        xa, e_flag = DA.lpf_update(xf, hx, Y[:, t], H, HC, Nt_eff*Ne, gamma, min_res, maxiter, kddm_flag, e_flag, qaqcpass, L)
                   case 2: # 3d var update
-                        xa, e_flag = DA.var_update(xf, hx, Y[:, t], C, HC, B, R, ntmax)
+                        xa_mean, e_flag = DA.var_update(xf, hx, Y[:, t], H, sqrt_C, R, model, x_fore_ens, ntmax)
+
+                        # Calculate ensemble perturbation increments using EnSRF, take out the mean, replace it with mean from var_update
+
+                        # hx = expt.obs_op.apply_H(xa)
+                        da_results = DA.EnSRF_update(xf, hx, Y[:, t], HC, HCH, var_y, inf_flag, e_flag, qaqcpass, 
+                                                     infs = infs, infs_y = infs_y, var_infs = var_infs, var_infs_y = var_infs_y, gamma = gamma)
+                        if len(da_results) == 2:
+                              xa, e_flag = da_results
+                        else:
+                              xa, infs, infs_y, var_infs, var_infs_y, e_flag = da_results
+                        xa_perturbation = xa - np.mean(xa, axis = -1)[:, np.newaxis]
+
+                        xa = xa_perturbation + np.mean(xa_mean, axis=-1)[:, np.newaxis]
+
+                        #With no localization, the mean of the EnSRF update should be the same as the increment of the 3dVar update
+                        # print(f"Mean of EnSRF update: {np.mean(xa, axis = -1)}")
+                        # print(f"Var update increment: {xa_mean}")
+                        # print(f"Difference: {np.mean(xa, axis = -1) - xa_mean}")
+                        # print(f"Are the two arrays equal? May just be close due to floating-point arithmetic: {np.all(np.mean(xa, axis = -1) == np.mean(xa_mean, axis=-1))}")
                   case 3: # Do Nothing
                         xa = xf
 
@@ -1194,6 +1232,7 @@ def runDA(expt: Expt, maxT : int = None):
             #pool_results  = pool.map(pfunc, [xa[:, i] for i in range(Ne)])
             #xf = np.stack([x for x, _ in pool_results], axis = -1)
             #model_errors = np.array([y for _, y in pool_results])
+
             xf, model_errors = model.forecast_batch(xa, tau)
             if np.any(model_errors != 0):
                   warnings.warn('Model integration failed at time T = {}. Terminating Experiment'.format(t))

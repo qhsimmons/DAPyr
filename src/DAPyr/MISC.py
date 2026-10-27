@@ -1,7 +1,11 @@
+from pyexpat import model
+
 import numpy as np
 from scipy.special import erf
 from scipy.interpolate import interp1d
 import warnings
+import jax
+
 
 def calc_SV(xa, xf):
       Nx, Ne = xa.shape
@@ -301,41 +305,138 @@ def gen_be(sigma, amp, m, dx):
     B = amp*np.exp( - ((x1-x2)**2) / (2*sigma**2))
     return B
 
-def gradJ(xb, v, cv, inov, U, R_inv, H):
+def apply_Ue(v, x_diff, sqrt_C):
+    """
+    Apply the localized ensemble transform U_e.
 
+    Parameters
+    ----------
+    v : ndarray
+        Shape (Nx, Ne)
+
+    x_diff : ndarray
+        Ensemble perturbations, shape (Nx, Ne)
+
+    sqrt_C : ndarray
+        Square root of localization matrix, shape (Nx, Nx)
+
+    Returns
+    -------
+    dx : ndarray
+        Model-space increment, shape (Nx,)
+    """
+
+    Ne = x_diff.shape[1]
+
+    # C^(1/2) v_n for every ensemble member
+    W = sqrt_C @ v
+
+    # Sum localized perturbations
+    dx = np.sum(x_diff * W, axis=1)
+
+    dx /= np.sqrt(Ne - 1)
+
+    return dx
+
+def apply_Ue_T(y, x_diff, sqrt_C):
+    """
+    Apply U_e^T.
+
+    Parameters
+    ----------
+    y : ndarray
+        Model-space vector, shape (Nx,)
+
+    x_diff : ndarray
+        Ensemble perturbations, shape (Nx, Ne)
+
+    sqrt_C : ndarray
+        Square root of localization matrix, shape (Nx, Nx)
+
+    Returns
+    -------
+    v : ndarray
+        Control-space vector, shape (Nx, Ne)
+    """
+
+    Ne = x_diff.shape[1]
+
+    # Each ensemble perturbation multiplied elementwise by y
+    temp = x_diff * y[:, None]
+
+    # Apply C^(1/2)^T
+    v = sqrt_C.T @ temp
+
+    v /= np.sqrt(Ne - 1)
+
+    return v
+
+def gradJ(v, cv, inov, apply_U, apply_UT, R_inv, H):
+
+    # Model-space increment
+    dx = apply_U(v)
+
+    # Obs-space innovation
+    obs_increment = H @ dx
+
+    # Gradient in control space
     g = cv + v
-    g = g + U.T@H.T@R_inv@(H@U@v - inov)
+    g += apply_UT(H.T@R_inv@(obs_increment - inov))
+    
     return g
 
 
-def cg_minimize(xg, xb, cv, inov, R_i, U, H, ntmax):
+def cg_minimize(cv, inov, y, x, R_i, H, apply_U, apply_UT, x_diff_mean, model, x_fore_ens, ntmax):
 
     # Set inner-loop control variable and x to zero
-    v   = cv*0
-    xv  = xg*0
+    v   = np.zeros_like(cv)
+    dx = apply_U(cv + v)
+
+    # print(f"Shape of inov: {inov.shape}")
+    # print(f"Shape of v: {v.shape}")
+    # print(f"Shape of U: {U.shape}")
+    # print(f"Shape of H: {H.shape}")
 
     # Set initial d and r to be negative the gradient
-    d = -1*gradJ(xb, v, cv, inov, U, R_i, H)
+    d = -1*gradJ(v, cv, inov, apply_U, apply_UT, R_i, H)
     r = d
 
     norm = np.zeros(ntmax+2)
     J    = np.zeros(ntmax+1)
     
-    gdot0   = d @ d
+    gdot0   = np.sum(d * d)
     gdot1   = gdot0
     norm[0] = np.sqrt(gdot1)
 
     # disp([])
     #disp(['Target gradient norm will be ',num2str(norm(1)*1e-4)])
     #disp(' ')
+    nsteps = 3
+    start = max(0, x_fore_ens.shape[2] - nsteps)
+
+    x0 = x_fore_ens[:, :, start].mean(axis=-1)
 
     for i in range(1, ntmax+2):
-
-        # Calculate Jb
-        Jb = (cv + v) @ (cv + v) /2.0
-
         # Calculate Jo
-        Jo = ( H@U@v - inov ).T @ R_i @ ( H@U@v - inov ) / 2.
+        # Here, need to iterate over all t from 0 to Tau, apply M_t by using jax.jvp, and add up
+
+        Jo = 0.
+        Jb = np.sum((cv + v)**2) /2.0
+        dx0 = dx
+        for t in range(nsteps):
+            if t == 0:
+                dx_t = dx0
+            else:
+
+                # Apply M_t using jax.jvp and accumulate the contribution to Jo
+                _, dx_t = jax.jvp(
+                        lambda x: model.forecast(x, t)[0],
+                        (x0,),
+                        (dx0,)
+                    )
+            Jo += ( H@dx_t - inov ).T @ R_i @ ( H@dx_t - inov ) / 2.
+
+        # Jo = ( H@dx - inov ).T @ R_i @ ( H@dx - inov ) / 2.
 
         norm[i] = np.sqrt(gdot1)
 
@@ -344,29 +445,26 @@ def cg_minimize(xg, xb, cv, inov, R_i, U, H, ntmax):
 
         J[i-1] = Jb + Jo
 
-        # Transform back to model space
-        xcv = U@cv
-        xv = U@v
-
         if norm[i]<norm[1]*1e-8:
             break
 
         # Calculate A*d
-        dum1 = cv*0
-        dum2 = inov*0
-        Ad = gradJ(xb, d, dum1, dum2, U, R_i, H)
+        Ad = gradJ(d, np.zeros_like(cv), np.zeros_like(inov), apply_U, apply_UT, R_i, H)
 
         # Update CG variables
-        a = gdot1 / (d.T@Ad)
+        a = gdot1 / np.sum(d * Ad)
         r = r - a*Ad
         v = v + a*d
         gdot0 = gdot1
-        gdot1 = r@r
+        gdot1 = np.sum(r * r)
         bet   = gdot1/gdot0
         d     = r + bet*d
 
-    xcv = xcv + xv
+        # Transform back to model space
+        dx = apply_U(cv + v)
+
+    dx = apply_U(cv + v)
     cv  = cv  + v
     
-    return xcv, cv, J
+    return dx, cv, J
 
